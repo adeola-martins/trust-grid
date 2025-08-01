@@ -268,3 +268,48 @@
     )
   )
 )
+
+;; REPUTATION & REVIEW SYSTEM
+
+;; Submit product review and rating
+(define-public (add-review
+    (product-id uint)
+    (rating uint)
+    (comment (string-ascii 200))
+  )
+  (let ((product (unwrap! (map-get? Products product-id) (err err-listing-not-found))))
+    (asserts! (<= rating u5) (err err-invalid-rating))
+    (ok (map-set Reviews {
+      product-id: product-id,
+      reviewer: tx-sender,
+    } {
+      rating: rating,
+      comment: comment,
+      timestamp: stacks-block-height,
+    }))
+  )
+)
+
+;; DATA RETRIEVAL FUNCTIONS
+
+(define-read-only (get-product (product-id uint))
+  (ok (map-get? Products product-id))
+)
+
+(define-read-only (get-brand (brand principal))
+  (ok (map-get? Brands brand))
+)
+
+(define-read-only (get-review
+    (product-id uint)
+    (reviewer principal)
+  )
+  (ok (map-get? Reviews {
+    product-id: product-id,
+    reviewer: reviewer,
+  }))
+)
+
+(define-read-only (get-auction (product-id uint))
+  (ok (map-get? Auctions product-id))
+)
