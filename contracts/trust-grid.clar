@@ -139,3 +139,65 @@
     )
   )
 )
+
+;; Execute instant product purchase
+(define-public (purchase-product (product-id uint))
+  (let (
+      (product (unwrap! (map-get? Products product-id) (err err-listing-not-found)))
+      (price (get price product))
+      (brand (get brand product))
+      (fee (/ (* price (var-get platform-fee)) u1000))
+    )
+    (if (and
+        (get available product)
+        (not (get is-auction product))
+        (>= (stx-get-balance tx-sender) price)
+      )
+      (begin
+        (try! (stx-transfer? fee tx-sender contract-owner))
+        (try! (stx-transfer? (- price fee) tx-sender brand))
+        (map-set Products product-id (merge product { available: false }))
+        (ok true)
+      )
+      (err err-insufficient-funds)
+    )
+  )
+)
+
+;; AUCTION SYSTEM FUNCTIONS
+
+;; Initialize time-bound auction
+(define-public (create-auction
+    (name (string-ascii 100))
+    (description (string-ascii 500))
+    (min-price uint)
+    (duration uint)
+  )
+  (let (
+      (brand (unwrap! (map-get? Brands tx-sender) (err err-not-brand-owner)))
+      (product-id (+ (var-get product-counter) u1))
+      (end-block (+ stacks-block-height duration))
+    )
+    (asserts! (>= duration u10) (err err-invalid-duration))
+    (asserts! (> min-price u0) (err err-invalid-price))
+    (begin
+      (var-set product-counter product-id)
+      (try! (map-set Products product-id {
+        brand: tx-sender,
+        name: name,
+        description: description,
+        price: min-price,
+        available: true,
+        created-at: stacks-block-height,
+        is-auction: true,
+      }))
+      (ok (map-set Auctions product-id {
+        end-block: end-block,
+        min-price: min-price,
+        highest-bid: u0,
+        highest-bidder: none,
+        is-active: true,
+      }))
+    )
+  )
+)
