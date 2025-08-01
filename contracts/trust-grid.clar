@@ -27,6 +27,9 @@
 (define-constant err-no-active-auction (err u107))
 (define-constant err-invalid-duration (err u108))
 (define-constant err-invalid-rating (err u109))
+(define-constant err-product-unavailable (err u110))
+(define-constant err-invalid-input (err u111))
+(define-constant err-invalid-brand (err u112))
 
 ;; PLATFORM CONFIGURATION
 (define-data-var platform-fee uint u25) ;; 2.5% platform fee
@@ -84,6 +87,33 @@
   }
 )
 
+;; INPUT VALIDATION HELPERS
+
+;; Validate string input is not empty
+(define-private (is-valid-string (input (string-ascii 500)))
+  (> (len input) u0)
+)
+
+;; Validate principal is not contract itself
+(define-private (is-valid-principal (input principal))
+  (not (is-eq input (as-contract tx-sender)))
+)
+
+;; Validate product name
+(define-private (is-valid-product-name (name (string-ascii 100)))
+  (and (> (len name) u0) (<= (len name) u100))
+)
+
+;; Validate product description
+(define-private (is-valid-description (desc (string-ascii 500)))
+  (and (> (len desc) u0) (<= (len desc) u500))
+)
+
+;; Validate review comment
+(define-private (is-valid-comment (comment (string-ascii 200)))
+  (and (> (len comment) u0) (<= (len comment) u200))
+)
+
 ;; GLOBAL COUNTERS
 (define-data-var product-counter uint u0)
 
@@ -91,22 +121,26 @@
 
 ;; Register new merchant brand
 (define-public (register-brand (name (string-ascii 50)))
-  (let ((brand-data {
-      name: name,
-      verified: false,
-      created-at: stacks-block-height,
-    }))
-    (ok (map-set Brands tx-sender brand-data))
+  (begin
+    (asserts! (is-valid-string name) err-invalid-input)
+    (let ((brand-data {
+        name: name,
+        verified: false,
+        created-at: stacks-block-height,
+      }))
+      (ok (map-set Brands tx-sender brand-data))
+    )
   )
 )
 
 ;; Platform owner brand verification
 (define-public (verify-brand (brand principal))
-  (if (is-eq tx-sender contract-owner)
-    (let ((brand-data (unwrap! (map-get? Brands brand) (err err-not-brand-owner))))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+    (asserts! (is-valid-principal brand) err-invalid-brand)
+    (let ((brand-data (unwrap! (map-get? Brands brand) err-not-brand-owner)))
       (ok (map-set Brands brand (merge brand-data { verified: true })))
     )
-    (err err-owner-only)
   )
 )
 
@@ -119,48 +153,40 @@
     (price uint)
   )
   (let (
-      (brand (unwrap! (map-get? Brands tx-sender) (err err-not-brand-owner)))
+      (brand (unwrap! (map-get? Brands tx-sender) err-not-brand-owner))
       (product-id (+ (var-get product-counter) u1))
     )
-    (if (> price u0)
-      (begin
-        (var-set product-counter product-id)
-        (ok (map-set Products product-id {
-          brand: tx-sender,
-          name: name,
-          description: description,
-          price: price,
-          available: true,
-          created-at: stacks-block-height,
-          is-auction: false,
-        }))
-      )
-      (err err-invalid-price)
-    )
+    (asserts! (is-valid-product-name name) err-invalid-input)
+    (asserts! (is-valid-description description) err-invalid-input)
+    (asserts! (> price u0) err-invalid-price)
+    (var-set product-counter product-id)
+    (ok (map-set Products product-id {
+      brand: tx-sender,
+      name: name,
+      description: description,
+      price: price,
+      available: true,
+      created-at: stacks-block-height,
+      is-auction: false,
+    }))
   )
 )
 
 ;; Execute instant product purchase
 (define-public (purchase-product (product-id uint))
   (let (
-      (product (unwrap! (map-get? Products product-id) (err err-listing-not-found)))
+      (product (unwrap! (map-get? Products product-id) err-listing-not-found))
       (price (get price product))
       (brand (get brand product))
       (fee (/ (* price (var-get platform-fee)) u1000))
     )
-    (if (and
-        (get available product)
-        (not (get is-auction product))
-        (>= (stx-get-balance tx-sender) price)
-      )
-      (begin
-        (try! (stx-transfer? fee tx-sender contract-owner))
-        (try! (stx-transfer? (- price fee) tx-sender brand))
-        (map-set Products product-id (merge product { available: false }))
-        (ok true)
-      )
-      (err err-insufficient-funds)
-    )
+    (asserts! (get available product) err-product-unavailable)
+    (asserts! (not (get is-auction product)) err-product-unavailable)
+    (asserts! (>= (stx-get-balance tx-sender) price) err-insufficient-funds)
+    (try! (stx-transfer? fee tx-sender contract-owner))
+    (try! (stx-transfer? (- price fee) tx-sender brand))
+    (map-set Products product-id (merge product { available: false }))
+    (ok true)
   )
 )
 
@@ -174,31 +200,31 @@
     (duration uint)
   )
   (let (
-      (brand (unwrap! (map-get? Brands tx-sender) (err err-not-brand-owner)))
+      (brand (unwrap! (map-get? Brands tx-sender) err-not-brand-owner))
       (product-id (+ (var-get product-counter) u1))
       (end-block (+ stacks-block-height duration))
     )
-    (asserts! (>= duration u10) (err err-invalid-duration))
-    (asserts! (> min-price u0) (err err-invalid-price))
-    (begin
-      (var-set product-counter product-id)
-      (try! (map-set Products product-id {
-        brand: tx-sender,
-        name: name,
-        description: description,
-        price: min-price,
-        available: true,
-        created-at: stacks-block-height,
-        is-auction: true,
-      }))
-      (ok (map-set Auctions product-id {
-        end-block: end-block,
-        min-price: min-price,
-        highest-bid: u0,
-        highest-bidder: none,
-        is-active: true,
-      }))
-    )
+    (asserts! (is-valid-product-name name) err-invalid-input)
+    (asserts! (is-valid-description description) err-invalid-input)
+    (asserts! (>= duration u10) err-invalid-duration)
+    (asserts! (> min-price u0) err-invalid-price)
+    (var-set product-counter product-id)
+    (map-set Products product-id {
+      brand: tx-sender,
+      name: name,
+      description: description,
+      price: min-price,
+      available: true,
+      created-at: stacks-block-height,
+      is-auction: true,
+    })
+    (ok (map-set Auctions product-id {
+      end-block: end-block,
+      min-price: min-price,
+      highest-bid: u0,
+      highest-bidder: none,
+      is-active: true,
+    }))
   )
 )
 
@@ -208,47 +234,39 @@
     (bid-amount uint)
   )
   (let (
-      (product (unwrap! (map-get? Products product-id) (err err-listing-not-found)))
-      (auction (unwrap! (map-get? Auctions product-id) (err err-no-active-auction)))
+      (product (unwrap! (map-get? Products product-id) err-listing-not-found))
+      (auction (unwrap! (map-get? Auctions product-id) err-no-active-auction))
     )
-    (asserts! (get is-active auction) (err err-auction-ended))
-    (asserts! (<= stacks-block-height (get end-block auction))
-      (err err-auction-ended)
+    (asserts! (get is-active auction) err-auction-ended)
+    (asserts! (<= stacks-block-height (get end-block auction)) err-auction-ended)
+    (asserts! (>= bid-amount (get min-price auction)) err-bid-too-low)
+    (asserts! (> bid-amount (get highest-bid auction)) err-bid-too-low)
+    (asserts! (>= (stx-get-balance tx-sender) bid-amount) err-insufficient-funds)
+    ;; Refund previous highest bidder
+    (match (get highest-bidder auction)
+      prev-bidder (try! (stx-transfer? (get highest-bid auction) contract-owner prev-bidder))
+      true
     )
-    (asserts! (>= bid-amount (get min-price auction)) (err err-bid-too-low))
-    (asserts! (> bid-amount (get highest-bid auction)) (err err-bid-too-low))
-    (if (>= (stx-get-balance tx-sender) bid-amount)
-      (begin
-        ;; Refund previous highest bidder
-        (match (get highest-bidder auction)
-          prev-bidder (try! (stx-transfer? (get highest-bid auction) contract-owner prev-bidder))
-          true
-        )
-        ;; Process new bid
-        (try! (stx-transfer? bid-amount tx-sender contract-owner))
-        (ok (map-set Auctions product-id
-          (merge auction {
-            highest-bid: bid-amount,
-            highest-bidder: (some tx-sender),
-          })
-        ))
-      )
-      (err err-insufficient-funds)
-    )
+    ;; Process new bid
+    (try! (stx-transfer? bid-amount tx-sender contract-owner))
+    (ok (map-set Auctions product-id
+      (merge auction {
+        highest-bid: bid-amount,
+        highest-bidder: (some tx-sender),
+      })
+    ))
   )
 )
 
 ;; Finalize auction and transfer ownership
 (define-public (end-auction (product-id uint))
   (let (
-      (product (unwrap! (map-get? Products product-id) (err err-listing-not-found)))
-      (auction (unwrap! (map-get? Auctions product-id) (err err-no-active-auction)))
+      (product (unwrap! (map-get? Products product-id) err-listing-not-found))
+      (auction (unwrap! (map-get? Auctions product-id) err-no-active-auction))
       (brand (get brand product))
     )
-    (asserts! (get is-active auction) (err err-auction-ended))
-    (asserts! (>= stacks-block-height (get end-block auction))
-      (err err-auction-ended)
-    )
+    (asserts! (get is-active auction) err-auction-ended)
+    (asserts! (>= stacks-block-height (get end-block auction)) err-auction-ended)
     (match (get highest-bidder auction)
       winner (begin
         (let (
@@ -259,12 +277,12 @@
           (try! (stx-transfer? fee contract-owner contract-owner))
           (try! (stx-transfer? (- bid-amount fee) contract-owner brand))
           ;; Update product availability
-          (try! (map-set Products product-id (merge product { available: false })))
+          (map-set Products product-id (merge product { available: false }))
           ;; Close auction
           (ok (map-set Auctions product-id (merge auction { is-active: false })))
         )
       )
-      (err err-no-active-auction)
+      err-no-active-auction
     )
   )
 )
@@ -277,8 +295,11 @@
     (rating uint)
     (comment (string-ascii 200))
   )
-  (let ((product (unwrap! (map-get? Products product-id) (err err-listing-not-found))))
-    (asserts! (<= rating u5) (err err-invalid-rating))
+  (let ((product (unwrap! (map-get? Products product-id) err-listing-not-found)))
+    (asserts! (<= rating u5) err-invalid-rating)
+    (asserts! (> rating u0) err-invalid-rating)
+    (asserts! (is-valid-comment comment) err-invalid-input)
+    (asserts! (> product-id u0) err-invalid-input)
     (ok (map-set Reviews {
       product-id: product-id,
       reviewer: tx-sender,
